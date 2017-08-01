@@ -12,6 +12,9 @@ from web.analogy import *
 from six import iteritems
 from web.embedding import Embedding
 
+from snlp.models.cec import CEC
+from sklearn.decomposition import PCA
+
 logger = logging.getLogger(__name__)
 
 def calculate_purity(y_true, y_pred):
@@ -82,7 +85,8 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
     if isinstance(w, dict):
         w = Embedding.from_dict(w)
 
-    assert method in ["all", "kmeans", "agglomerative", "mean-shift", "spectral", "affinityPropagation", "birch"], "Uncrecognized method"
+    # assert method in ["all", "kmeans", "agglomerative", "mean-shift", "spectral", "affinityPropagation", "birch"], "Uncrecognized method"
+    assert method in ["all", "kmeans", "agglomerative", "mean-shift", "spectral", "birch", "cec"], "Uncrecognized method"
 
     mean_vector = np.mean(w.vectors, axis=0, keepdims=True)
     words = np.vstack(w.get(word, mean_vector) for word in X.flatten())
@@ -110,7 +114,14 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
                                   fit_predict(words[ids]))
         logger.debug("Purity={:.3f} using KMeans".format(purity))
         best_purity = max(purity, best_purity)
-        
+
+    if method == "all" or method == "cec":
+        pca = PCA(n_components=10)
+        data=pca.fit_transform(words[ids])
+        best_purity = calculate_purity(y[ids], CEC(n_clusters=len(set(y))).fit_predict(data))
+        logger.debug("Purity={:.3f} using cec ".format(purity))
+        best_purity = max(purity, best_purity)
+
     if method == "all" or method == "mean-shift":
         # # # If takes too long: Note that the estimate_bandwidth function
         # # # is much less scalable than the mean shift algorithm 
@@ -128,18 +139,17 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
             logger.debug("Purity={:.3f} using SpectralClustering affinity={}".format(purity, affinity))
             best_purity = max(purity, best_purity)
           
-    if method == "all" or method == "affinityPropagation":
-        # preference : array-like, shape (n_samples,) or float, optional
-        #
-        # Preferences for each point - points with larger values of preferences are more
-        # likely to be chosen as exemplars. The number of exemplars, ie of clusters, is
-        # influenced by the input preferences value. If the preferences are not passed as
-        # arguments, they will be set to the median of the input similarities.
-
-        for affinity in ["cosine", "euclidean"]:
-            purity = calculate_purity(y[ids], AffinityPropagation(preference=None, affinity=affinity).fit_predict(words[ids]))
-            logger.debug("Purity={:.3f} using Affinity Propagation".format(purity))
-            best_purity = max(purity, best_purity)
+    # if method == "all" or method == "affinityPropagation":
+    #     # preference : array-like, shape (n_samples,) or float, optional
+    #     #
+    #     # Preferences for each point - points with larger values of preferences are more
+    #     # likely to be chosen as exemplars. The number of exemplars, ie of clusters, is
+    #     # influenced by the input preferences value. If the preferences are not passed as
+    #     # arguments, they will be set to the median of the input similarities.
+    #
+    #     purity = calculate_purity(y[ids], AffinityPropagation(preference=None, affinity="euclidean").fit_predict(words[ids]))
+    #     logger.debug("Purity={:.3f} using Affinity Propagation".format(purity))
+    #     best_purity = max(purity, best_purity)
 
 
     if method == "all" or method == "birch":
