@@ -17,7 +17,9 @@ from six import iteritems
 from web.embedding import Embedding
 
 from snlp.models.cec import CEC
+from snlp.loss.brown_clustering import BrownCost
 from sklearn.decomposition import PCA
+from web import SUMC_PATH, TEMP_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +52,7 @@ def calculate_purity(y_true, y_pred):
     return 1. / len(y_true) * np.sum(np.max(M, axis=1))
 
 
-def evaluate_categorization(w, X, y, method="all", seed=None):
+def evaluate_categorization(w, X, y, method="all", anti_loss="purity" seed=None,):
     """
     Evaluate embeddings on categorization task.
 
@@ -74,7 +76,10 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
 
     seed: int, default: None
       Seed passed to KMeans.
-
+      
+    anti_loss:str, default: "purity"
+      which metric to use, "purity", "brown", "all"
+          
     Returns
     -------
     purity: float
@@ -85,12 +90,15 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
     KMedoids method was excluded as empirically didn't improve over KMeans (for categorization
     tasks available in the package).
     """
-
+    
     if isinstance(w, dict):
         w = Embedding.from_dict(w)
 
-    # assert method in ["all", "kmeans", "agglomerative", "mean-shift", "spectral", "affinityPropagation", "birch"], "Uncrecognized method"
     assert method in ["all", "kmeans", "agglomerative", "mean-shift", "spectral", "birch", "cec", "sumc"], "Uncrecognized method"
+    assert anti_loss in ["all", "purity", "brown"], "Uncrecognized metric"
+    
+    if anti_loss in ["all", "brown"]:
+        brown_cost = BrownCost(tokens)  # TODO what are tokens here!??
 
     mean_vector = np.mean(w.vectors, axis=0, keepdims=True)
     words = np.vstack(w.get(word, mean_vector) for word in X.flatten())
@@ -99,6 +107,7 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
     # Evaluate clustering on several hyperparameters of AgglomerativeClustering and
     # KMeans
     best_purity = 0
+    best_quality = 0
 
     if method == "all" or method == "agglomerative":
         best_purity = calculate_purity(y[ids], AgglomerativeClustering(n_clusters=len(set(y)),
@@ -107,55 +116,71 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
         logger.debug("Purity={:.3f} using affinity={} linkage={}".format(best_purity, 'euclidean', 'ward'))
         for affinity in ["cosine", "euclidean"]:
             for linkage in ["average", "complete"]:
-                purity = calculate_purity(y[ids], AgglomerativeClustering(n_clusters=len(set(y)),
-                                                                          affinity=affinity,
-                                                                          linkage=linkage).fit_predict(words[ids]))
-                logger.debug("Purity={:.3f} using affinity={} linkage={}".format(purity, affinity, linkage))
-                best_purity = max(best_purity, purity)
+                preds = AgglomerativeClustering(n_clusters=len(set(y)),
+                                                affinity=affinity,
+                                                linkage=linkage).fit_predict(words[ids])
+                if loss == "purity" or "all":
+                    purity = calculate_purity(y[ids], preds)
+                    logger.debug("Purity={:.3f} using affinity={} linkage={}".format(purity, affinity, linkage))
+                    best_purity = max(best_purity, purity)
+                if loss == "brown" or loss == "all":
+                    quality = brown_cost.quality(clustering)  # we have to make clustering according to our wytyczne
+                    logger.debug("Brown Quality={:.3f} using affinity={} linkage={}".format(quality, affinity, linkage))
+                    best_quality = max(best_quality, quality)
 
     if method == "all" or method == "kmeans":
-        purity = calculate_purity(y[ids], KMeans(random_state=seed, n_init=10, n_clusters=len(set(y))).
-                                  fit_predict(words[ids]))
-        logger.debug("Purity={:.3f} using KMeans".format(purity))
-        best_purity = max(purity, best_purity)
+        preds = KMeans(random_state=seed, n_init=10, n_clusters=len(set(y))).fit_predict(words[ids])
+        if loss == "purity" or "all":
+            purity = calculate_purity(y[ids], preds)
+            logger.debug("Purity={:.3f} using KMeans".format(purity))
+            best_purity = max(purity, best_purity)
+        if loss == "brown" or loss == "all":
+            quality = brown_cost.quality(clustering)  # we have to make clustering according to our wytyczne
+            logger.debug("Brown Quality={:.3f} using KMeans".format(quality))
+            best_quality = max(best_quality, quality)
 
     if method == "all" or method == "cec":
         pca = PCA(n_components=10)
         data=pca.fit_transform(words[ids])
-        best_purity = calculate_purity(y[ids], CEC(n_clusters=len(set(y))).fit_predict(data))
-        logger.debug("Purity={:.3f} using cec ".format(purity))
-        best_purity = max(purity, best_purity)
+        preds = CEC(n_clusters=len(set(y))).fit_predict(data)
+        if loss == "purity" or "all":
+            best_purity = calculate_purity(y[ids], preds)
+            logger.debug("Purity={:.3f} using cec".format(purity))
+            best_purity = max(purity, best_purity)
+        if loss == "brown" or loss == "all":
+            quality = brown_cost.quality(clustering)  # we have to make clustering according to our wytyczne
+            logger.debug("Brown Quality={:.3f} using cec".format(quality))
+            best_quality = max(best_quality, quality)
 
     if method == "all" or method == "mean-shift":
         # # # If takes too long: Note that the estimate_bandwidth function
         # # # is much less scalable than the mean shift algorithm 
-        # # # and will be the bottleneck if it is used.
-        purity = calculate_purity(y[ids], MeanShift(bin_seeding = True, n_jobs=5).fit_predict(words[ids]))
-        logger.debug("Purity={:.3f} using MeanShift".format(purity))
-        best_purity = max(purity, best_purity)
+        # # # and will be the bottleneck if it is used. (sklearn-docs)
+        preds = MeanShift(bin_seeding = True, n_jobs=5)
+        if loss == "purity" or "all":
+            purity = calculate_purity(y[ids], preds).fit_predict(words[ids])
+            logger.debug("Purity={:.3f} using MeanShift".format(purity))
+            best_purity = max(purity, best_purity)
+        if loss == "brown" or loss == "all":
+            quality = brown_cost.quality(clustering)  # we have to make clustering according to our wytyczne
+            logger.debug("Brown Quality={:.3f} using MeanShift".format(quality))
+            best_quality = max(best_quality, quality)
         
     if method == "all" or method == "spectral":
         for affinity in ['nearest_neighbors', 'rbf']:
-            purity = calculate_purity(y[ids], SpectralClustering(n_clusters=len(set(y)),
-                                                                 affinity=affinity,
-                                                                 random_state=seed,
-                                                                 n_jobs=5).fit_predict(words[ids]))
-            logger.debug("Purity={:.3f} using SpectralClustering affinity={}".format(purity, affinity))
-            best_purity = max(purity, best_purity)
-          
-    # if method == "all" or method == "affinityPropagation":
-    #     # preference : array-like, shape (n_samples,) or float, optional
-    #     #
-    #     # Preferences for each point - points with larger values of preferences are more
-    #     # likely to be chosen as exemplars. The number of exemplars, ie of clusters, is
-    #     # influenced by the input preferences value. If the preferences are not passed as
-    #     # arguments, they will be set to the median of the input similarities.
-    #
-    #     purity = calculate_purity(y[ids], AffinityPropagation(preference=None, affinity="euclidean").fit_predict(words[ids]))
-    #     logger.debug("Purity={:.3f} using Affinity Propagation".format(purity))
-    #     best_purity = max(purity, best_purity)
-
-
+            preds =SpectralClustering(n_clusters=len(set(y)),
+                                      affinity=affinity,
+                                      random_state=seed,
+                                      n_jobs=5).fit_predict(words[ids])
+            if loss == "purity" or "all":
+                purity = calculate_purity(y[ids], preds)
+                logger.debug("Purity={:.3f} using SpectralClustering affinity={}".format(purity, affinity))
+                best_purity = max(purity, best_purity)
+            if loss == "brown" or loss == "all":
+                quality = brown_cost.quality(clustering)  # we have to make clustering according to our wytyczne
+                logger.debug("Brown Quality={:.3f} using SpectralClustering affinity={}".format(quality, affinity))
+                best_quality = max(best_quality, quality)    
+               
     if method == "all" or method == "birch":
         purity = calculate_purity(y[ids], Birch(threshold=0.5, branching_factor=50, n_clusters=len(set(y))).fit_predict(words[ids]))
         logger.debug("Purity={:.3f} using Birch".format(purity))
@@ -163,7 +188,7 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
 
     if method == "all" or method == "sumc":
 
-        temp_dir = "/var/tmp/SuMC_WRXCJKKJN"
+        temp_dir = TEMP_DIR
 
         try:
             os.makedirs(temp_dir)
@@ -181,8 +206,7 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
         temp_output = os.path.join(temp_dir, 'SuMC_clustering.txt')
         np.savetxt(temp_input, words[ids], delimiter=',')
 
-        # # Must change absolute path to 'SuMC' program!                                              <---------
-        # sumc_path = '/media/lukasz/HDD/experiments/samsung/word-embeddings-benchmarks/sumc'
+        sumc_path = SUMC_PATH
 
         try:
             subprocess.check_output(
@@ -191,18 +215,23 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
         except subprocess.CalledProcessError as exc:
             print "CPP: FAIL", exc.returncode, "\n", exc.output
         else:
-            y_pred = np.genfromtxt(temp_output, skip_header=0, skip_footer=0, delimiter=' ', dtype='int')
+            preds = np.genfromtxt(temp_output, skip_header=0, skip_footer=0, delimiter=' ', dtype='int')
 
             try:
                 shutil.rmtree(temp_dir)
             except OSError:
                 pass
 
-        purity = calculate_purity(y[ids], y_pred)
-        logger.debug("Purity={:.3f} using SuMC".format(purity))
-        best_purity = max(purity, best_purity)
-
-    return best_purity
+        if loss == "purity" or "all":
+            purity = calculate_purity(y[ids], preds)
+            logger.debug("Purity={:.3f} using Birch".format(purity))
+            best_purity = max(purity, best_purity)
+        if loss == "brown" or loss == "all":
+            quality = brown_cost.quality(clustering)  # we have to make clustering according to our wytyczne
+            logger.debug("Brown Quality={:.3f} using Birch".format(quality))
+            best_quality = max(best_quality, quality)    
+     
+    return best_purity, best_quality
 
 
 
