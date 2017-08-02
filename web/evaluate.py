@@ -2,7 +2,11 @@
 """
  Evaluation functions
 """
+import os
+import errno
+import shutil
 import logging
+import subprocess
 import numpy as np
 from sklearn.cluster import AgglomerativeClustering, KMeans, MeanShift, SpectralClustering, AffinityPropagation, Birch
 from .datasets.similarity import fetch_MEN, fetch_WS353, fetch_SimLex999, fetch_MTurk, fetch_RG65, fetch_RW
@@ -86,7 +90,7 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
         w = Embedding.from_dict(w)
 
     # assert method in ["all", "kmeans", "agglomerative", "mean-shift", "spectral", "affinityPropagation", "birch"], "Uncrecognized method"
-    assert method in ["all", "kmeans", "agglomerative", "mean-shift", "spectral", "birch", "cec"], "Uncrecognized method"
+    assert method in ["all", "kmeans", "agglomerative", "mean-shift", "spectral", "birch", "cec", "sumc"], "Uncrecognized method"
 
     mean_vector = np.mean(w.vectors, axis=0, keepdims=True)
     words = np.vstack(w.get(word, mean_vector) for word in X.flatten())
@@ -156,7 +160,48 @@ def evaluate_categorization(w, X, y, method="all", seed=None):
         purity = calculate_purity(y[ids], Birch(threshold=0.5, branching_factor=50, n_clusters=len(set(y))).fit_predict(words[ids]))
         logger.debug("Purity={:.3f} using Birch".format(purity))
         best_purity = max(purity, best_purity)
-     
+
+    if method == "all" or method == "sumc":
+
+        temp_dir = "/var/tmp/SuMC_WRXCJKKJN"
+
+        try:
+            os.makedirs(temp_dir)
+        except OSError as exc:
+            if exc.errno == errno.EEXIST and os.path.isdir(temp_dir):
+                pass
+            else:
+                raise
+
+        # parameters for SuMC
+        iters = 10
+
+        # save data to temporary folder
+        temp_input = os.path.join(temp_dir, 'data.txt')
+        temp_output = os.path.join(temp_dir, 'SuMC_clustering.txt')
+        np.savetxt(temp_input, words[ids], delimiter=',')
+
+        # # Must change absolute path to 'SuMC' program!                                              <---------
+        # sumc_path = '/media/lukasz/HDD/experiments/samsung/word-embeddings-benchmarks/sumc'
+
+        try:
+            subprocess.check_output(
+                [sumc_path, temp_input,
+                 str(len(set(y))), str(iters), '0', temp_output], stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as exc:
+            print "CPP: FAIL", exc.returncode, "\n", exc.output
+        else:
+            y_pred = np.genfromtxt(temp_output, skip_header=0, skip_footer=0, delimiter=' ', dtype='int')
+
+            try:
+                shutil.rmtree(temp_dir)
+            except OSError:
+                pass
+
+        purity = calculate_purity(y[ids], y_pred)
+        logger.debug("Purity={:.3f} using SuMC".format(purity))
+        best_purity = max(purity, best_purity)
+
     return best_purity
 
 

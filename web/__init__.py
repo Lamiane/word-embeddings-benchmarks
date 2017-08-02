@@ -1,0 +1,1 @@
+sumc_path = '/var/data/users/local/samsung/sumc/sumc'
